@@ -1,6 +1,6 @@
 import pygame
-import sys
-import random, time
+import numpy as np
+import sys, random, time, math
 
 # Initialize Pygame
 pygame.init()
@@ -11,7 +11,16 @@ simulation2 = pygame.sprite.Group()
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
 LANE_WIDTH = 150
+VEHICLE_WIDTH = 0
+VEHICLE_HEIGHT = 0
 VEHICLE_MAX_VELOCITY = 8
+PEDESTRIAN_MAX_VELOCITY = 2
+
+# pedestrian motivation constants
+alpha = 0.8
+psi = np.array([3, -0.3])
+beta = 2.2
+t_reaction = 0.05
 
 # Colors
 WHITE = (255, 255, 255)
@@ -29,15 +38,28 @@ class Pedestrian(pygame.sprite.Sprite):
         # starting position of pedestrian
         self.x = SCREEN_WIDTH // 2 - self.image.get_rect().width // 2
         self.y = SCREEN_HEIGHT // 2 - LANE_WIDTH // 2 - 50
+        self.velocity = PEDESTRIAN_MAX_VELOCITY
+        self.acceleration = 0
 
         # initial motivation of pedestrian to cross the road
         self.motivation = 1
 
         # add pedestrian to simulation
         simulation2.add(self)
+    
+    def updateMotivation(self, D_pv, cv):
+        t_adv = (D_pv/cv) - (LANE_WIDTH/self.velocity) - t_reaction
+        f = np.array([t_adv, self.acceleration])
 
-    def move(self, vx, vy, vs):
+        f.transpose()
+        p = math.exp(-(psi.dot(f) - beta))
+        M_bar = 1/(1 + p)
+        self.motivation = alpha * self.motivation + (1 - alpha) * M_bar
+
+    def move(self, cx, cy, cv):
         # update motivation
+        D_pv = self.x - (cx + VEHICLE_WIDTH)
+        self.updateMotivation(D_pv, cv)
         
         # calc. navigational force
 
@@ -53,10 +75,12 @@ class Car(pygame.sprite.Sprite):
     def __init__(self):
         pygame.sprite.Sprite.__init__(self)
         self.image = pygame.image.load('images/car.png')
-        simulation1.add(self)
+
         self.x = 0
         self.y = SCREEN_HEIGHT // 2 - self.image.get_rect().height // 2
         self.velocity = VEHICLE_MAX_VELOCITY
+        
+        simulation1.add(self)
 
     def move(self):
         self.velocity = random.randint(3,5)
@@ -76,6 +100,9 @@ class Main:
     # Initialize objects
     car = Car()
     Pedestrian()
+    global VEHICLE_WIDTH, VEHICLE_HEIGHT
+    VEHICLE_WIDTH = car.image.get_rect().width
+    VEHICLE_HEIGHT = car.image.get_rect().height
 
     try:
         while True:
