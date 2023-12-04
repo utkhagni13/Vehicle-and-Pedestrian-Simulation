@@ -1,6 +1,6 @@
 import pygame
 import numpy as np
-import sys, random, time, math
+import sys, random, math, threading, time
 
 # Initialize Pygame
 pygame.init()
@@ -11,22 +11,46 @@ simulation2 = pygame.sprite.Group()
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
 LANE_WIDTH = 150
-VEHICLE_WIDTH = 0
-VEHICLE_HEIGHT = 0
+VEHICLE_LENGTH = 80
+VEHICLE_WIDTH = 30
 VEHICLE_MAX_VELOCITY = 8
-PEDESTRIAN_MAX_VELOCITY = 2
+PEDESTRIAN_MAX_VELOCITY = 1
+VEHICLE_MAX_ACC = 3
 
-# pedestrian motivation constants
+# pedestrian constants
 alpha = 0.8
 psi = np.array([3, -0.3])
 beta = 2.2
 t_reaction = 0.05
+theta = 0.3
+
+kd = 200
+sigma_nav = 0.09
+
+A_shape = 800
+d0_shape = 4.0
+sigma_shape = 0.1
+
+A_flow = 600
+d0_flow = 6.0
+sigma_flow = 0.1
+
+A_speed = 400
+delT = 1.0
+sigma_y = 0.2 * LANE_WIDTH
+
+mass = 75
+kv = 0.1
 
 # Colors
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 RED = (255, 0, 0)
 BLUE = (0, 0, 255)
+
+# miscellaneous functions
+def magnitude(vec):
+    return math.sqrt(vec[0]**2 + vec[1]**2)
 
 
 # Pedestrian class
@@ -36,10 +60,21 @@ class Pedestrian(pygame.sprite.Sprite):
         self.image = pygame.image.load('images/ped.png')
 
         # starting position of pedestrian
-        self.x = SCREEN_WIDTH // 2 - self.image.get_rect().width // 2
-        self.y = SCREEN_HEIGHT // 2 - LANE_WIDTH // 2 - 50
-        self.velocity = PEDESTRIAN_MAX_VELOCITY
-        self.acceleration = 0
+        x = SCREEN_WIDTH // 2 - self.image.get_rect().width // 2
+        y = SCREEN_HEIGHT // 2 - LANE_WIDTH // 2 - 50
+        self.p0 = np.array([x, y])
+        self.pos = np.array([x, y])
+        
+        gx = SCREEN_WIDTH // 2 - self.image.get_rect().width // 2
+        gy = SCREEN_HEIGHT // 2 + LANE_WIDTH // 2 + 5
+        self.goal = np.array([gx, gy])
+        self.initial_to_goal_vec = (self.goal - self.p0)
+        self.initial_to_goal_mag = magnitude(self.goal - self.p0)
+        
+        self.curr_vel = np.array([0, PEDESTRIAN_MAX_VELOCITY])
+        self.desr_vel = self.curr_vel
+
+        self.acceleration = np.array([0, 0])
 
         # initial motivation of pedestrian to cross the road
         self.motivation = 1
@@ -47,27 +82,74 @@ class Pedestrian(pygame.sprite.Sprite):
         # add pedestrian to simulation
         simulation2.add(self)
     
-    def updateMotivation(self, D_pv, cv):
-        t_adv = (D_pv/cv) - (LANE_WIDTH/self.velocity) - t_reaction
-        f = np.array([t_adv, self.acceleration])
+    def updateMotivation(self, D_pv, cv, ca):
+        t_adv = (D_pv/cv) - (LANE_WIDTH/magnitude(self.curr_vel)) - t_reaction
+        f = np.array([t_adv, ca])
 
         f.transpose()
         p = math.exp(-(psi.dot(f) - beta))
         M_bar = 1/(1 + p)
         self.motivation = alpha * self.motivation + (1 - alpha) * M_bar
+    
+    def getH(self, d, A, d0, sigma):
+        return A/(2 * d0) * (d0 - d + math.sqrt( (d0 - d)**2 + sigma**2 ))
 
-    def move(self, cx, cy, cv):
+    def move(self, car_x, car_vel, car_acc):
         # update motivation
-        D_pv = self.x - (cx + VEHICLE_WIDTH)
-        self.updateMotivation(D_pv, cv)
+        cv, ca = magnitude(car_vel), magnitude(car_acc)
+        D_pv = abs(self.pos[0] - (car_x + VEHICLE_LENGTH))
+        self.updateMotivation(D_pv, cv, ca)
         
         # calc. navigational force
+        v_des = (magnitude(self.desr_vel)/math.sqrt( magnitude(self.goal - self.pos)**2 + sigma_nav**2 )) * (self.goal - self.pos)
+        F_nav = (self.motivation * kd) * (self.curr_vel - v_des)
+        print(f"D_pv: {D_pv}, Motivation: {self.motivation}, v_des: {v_des}, F_nav: {F_nav[1]}\n")
 
-        # calc. vehicle's interaction with pedestrian
+        # vehicle's influence on pedestrian
+        # calc. F_shape
+        a, b = VEHICLE_LENGTH/2, VEHICLE_WIDTH/2
+        d = math.sqrt( (self.pos[0]/a)**2 + (self.pos[1]/b)**2 )
+        h_shape = self.getH(d, A_shape, d0_shape, sigma_shape)
+        shape_const = np.array([ (2*self.pos[0])/(a**2), (2*self.pos[1])/(b**2) ])
+        F_shape = h_shape/magnitude(shape_const) * shape_const
+        print(f"Hs: {h_shape}, F_shape: {F_shape}\n")
 
-        self.y += 1  # Adjust speed as needed
-        if self.y > SCREEN_HEIGHT:
-            self.y = SCREEN_HEIGHT // 2 - LANE_WIDTH // 2 - 100  # Reset position when reaching the bottom
+        # calc. F_flow
+        P = ( (self.pos - self.p0).dot(self.initial_to_goal_vec) / self.initial_to_goal_mag ) # projection of curr pos on direct path
+        kf_p = 1.0
+        if (P <= 0):
+            kf_p = 1.0
+        elif (P > self.initial_to_goal_mag):
+            kf_p = 0
+        else:
+            kf_p = (self.initial_to_goal_mag - P)/self.initial_to_goal_mag
+        
+        h_flow = self.getH(d, A_flow, d0_flow, sigma_flow)
+        flow_const = np.array([ (-2 * (self.pos[1]**3))/b, (2 * (self.pos[0]**3))/a ])
+        F_flow = (kf_p * h_flow)/magnitude(flow_const) * flow_const
+        print(f"P: {P}, Kf_p: {kf_p}, Hf: {h_flow}, F_flow: {F_flow}\n")
+
+        # calc. F_speed
+        F_speed = np.array([ 0, A_speed * math.exp(-(self.pos[0] - a)/(cv * delT)) * math.exp(-(self.pos[1]**2)/(2 * sigma_y**2)) ])
+        print(f"F_speed: {F_speed}\n")
+
+        # calc. F_veh
+        kv_param = 1/(1 + kv * magnitude(self.curr_vel)**2)
+        F_veh = F_shape + (kv_param) * F_flow + (1 - kv_param) * F_speed
+        print(f"F_veh: {F_veh}")
+
+        # calc. F_total
+        F_total = F_nav + F_veh
+        self.acceleration = F_total/mass
+        print(f"F_total: {F_total}, acc: {self.acceleration}")
+        print("______________________________________________________________________________________________________________")
+
+        # move the pedestrian
+        self.pos[1] += self.curr_vel[1]  # Adjust speed as needed
+        if self.pos[1] > SCREEN_HEIGHT:
+            self.pos[1] = SCREEN_HEIGHT // 2 - LANE_WIDTH // 2 - 100  # Reset position when reaching the bottom
+        print()
+        print()
 
 
 # Car class
@@ -76,17 +158,36 @@ class Car(pygame.sprite.Sprite):
         pygame.sprite.Sprite.__init__(self)
         self.image = pygame.image.load('images/car.png')
 
-        self.x = 0
-        self.y = SCREEN_HEIGHT // 2 - self.image.get_rect().height // 2
-        self.velocity = VEHICLE_MAX_VELOCITY
+        self.pos = np.array([0, SCREEN_HEIGHT // 2 - self.image.get_rect().height // 2])
+
+        self.curr_vel = np.array([VEHICLE_MAX_VELOCITY, 0])
+        self.acceleration = np.array([0, 0])
         
         simulation1.add(self)
 
     def move(self):
-        self.velocity = random.randint(3,5)
-        self.x += self.velocity  # Adjust speed as needed
-        if self.x > SCREEN_WIDTH:
-            self.x = 0  # Reset position when reaching the right edge
+        self.curr_vel[0] = random.randint(4, VEHICLE_MAX_VELOCITY)
+        self.pos[0] += self.curr_vel[0]  # Adjust speed as needed
+        if self.pos[0] > SCREEN_WIDTH:
+            self.pos[0] = 0  # Reset position when reaching the right edge
+
+
+def text_objects(text, font):
+    textSurface = font.render(text, True, (0,0,0))
+    return textSurface, textSurface.get_rect()
+
+def paused(screen):
+    largeText = pygame.font.SysFont("comicsansms", 55, bold=True)
+    TextSurf, TextRect = text_objects("CRASH!!!", largeText)
+    TextRect.center = ((SCREEN_WIDTH/2),(SCREEN_HEIGHT/20))
+    screen.blit(TextSurf, TextRect)
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                quit()
+        pygame.display.update()
+        pygame.time.Clock().tick(60)
 
 
 class Main:
@@ -100,9 +201,9 @@ class Main:
     # Initialize objects
     car = Car()
     Pedestrian()
-    global VEHICLE_WIDTH, VEHICLE_HEIGHT
-    VEHICLE_WIDTH = car.image.get_rect().width
-    VEHICLE_HEIGHT = car.image.get_rect().height
+    global VEHICLE_LENGTH, VEHICLE_WIDTH
+    VEHICLE_LENGTH = car.image.get_rect().width
+    VEHICLE_WIDTH = car.image.get_rect().height
 
     try:
         while True:
@@ -112,26 +213,28 @@ class Main:
                     sys.exit()
             screen.blit(background, (0, 0))
 
+            cx, cy = car.pos[0], car.pos[1]
             ########################## update pedestrian's movement ##########################
             for pedestrian in simulation2:
-                screen.blit(pedestrian.image, [pedestrian.x, pedestrian.y])
+                screen.blit(pedestrian.image, [pedestrian.pos[0], pedestrian.pos[1]])
                 # update movement of pedestrian
-                pedestrian.move(car.x, car.y, car.velocity)
+                pedestrian.move(cx, car.curr_vel, car.acceleration)
 
             ########################## update car's movement ##########################
-            screen.blit(car.image, [car.x, car.y])
+            screen.blit(car.image, [cx, cy])
             car.move()
             # Check for pedestrian-car collision
             for ped in simulation2:
+                px, py = ped.pos[0], ped.pos[1]
                 if (
-                    car.x < ped.x + ped.image.get_rect().width
-                    and car.x + car.image.get_rect().width > ped.x
-                    and car.y < ped.y + ped.image.get_rect().height
-                    and car.y + car.image.get_rect().height > ped.y + ped.image.get_rect().height
+                    cx < px + ped.image.get_rect().width
+                    and cx + VEHICLE_LENGTH > px
+                    and cy < py + ped.image.get_rect().height
+                    and cy + VEHICLE_WIDTH > py + ped.image.get_rect().height
                 ):
-                    print(f"car: {car.x} {car.y} {car.image.get_rect().width} {car.image.get_rect().height}, ped: {ped.x} {ped.y} {ped.image.get_rect().width} {ped.image.get_rect().height}")
-                    print("Collision!")
-                    sys.exit()
+                    # print(f"car: {cx} {cy} {car.image.get_rect().width} {car.image.get_rect().height}, ped: {px} {py} {ped.image.get_rect().width} {ped.image.get_rect().height}")
+                    print("COLLISION!!!")
+                    paused(screen)
                     # add collision handling logic here.
 
             pygame.display.update()
