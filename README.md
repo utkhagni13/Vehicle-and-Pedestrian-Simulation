@@ -1,5 +1,5 @@
 # Vehicle-and-Pedestrian-Simulation
-This project displays a simulation of pedestrians' behaviours and actions while crossing a road or lane in presence of a vehicle coming towards them to avoid their accidents.
+This project displays a simulation of pedestrians' behaviours and actions while crossing a road or lane in presence of a vehicle coming towards them to avoid their accidents. Currently working on idea of simulating the model with multiple pedestrians and one vehicle.
 
 Watch the simulation here - [https://drive.google.com/drive/folders/1KCiTrkRA7L0P3sN1Uvtnsxv3r4BJGHp3?usp=sharing](https://drive.google.com/drive/folders/1KCiTrkRA7L0P3sN1Uvtnsxv3r4BJGHp3?usp=sharing)
 
